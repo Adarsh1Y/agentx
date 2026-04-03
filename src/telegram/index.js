@@ -201,5 +201,36 @@ bot.onText(/\/agent/, async (msg) => {
   await bot.sendMessage(msg.chat.id, '🤖 Agent mode enabled. Use /run <task> to execute tasks.');
 });
 
+bot.onText(/\/health/, async (msg) => {
+  const chatId = msg.chat.id;
+  const { getProviderHealth } = await import('../core/providers/index.js');
+  const health = getProviderHealth();
+  const orIcon = health.openrouter === 'healthy' ? '🟢' : '🔴';
+  const olIcon = health.ollama === 'healthy' ? '🟢' : '🔴';
+  let text = `🏥 Health Check\n\n`;
+  text += `${olIcon} Ollama: ${health.ollama}\n`;
+  text += `${orIcon} OpenRouter: ${health.openrouter}\n`;
+  text += `🎯 Primary: ${health.primary}\n\n`;
+  text += `Auto-switch enabled: if primary fails, fallback to secondary`;
+  await bot.sendMessage(chatId, text);
+});
+
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+  let text = `🤖 *AgentX - Autonomous AI Agent*\n\n`;
+  text += `I can plan, code, and learn from tasks.\n\n`;
+  text += `*Commands:*\n`;
+  text += `/run <task> — Execute a task\n`;
+  text += `/chat — Enable chat mode\n`;
+  text += `/status — System status\n`;
+  text += `/debug <id> — Inspect a job\n`;
+  text += `/cancel — Cancel active job\n`;
+  text += `/models — List models\n`;
+  text += `/provider <name> — Switch provider\n`;
+  text += `/health — Check provider health\n`;
+  text += `/agent — Enable agent mode\n`;
+  await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+});
+
 log.info('TELEGRAM', 'Bot started');
 console.log('Telegram bot running. Send /status to check.');
