@@ -7,7 +7,7 @@ import { SessionManager } from '../session/manager.js';
 import { loadConfig, ensureDataDir } from '../utils/config.js';
 import createLogger from '../utils/logger.js';
 import { detectIntent } from './intent.js';
-import { detectConversational, getConversationalResponse, runSystemQuery } from './conversation.js';
+import { detectConversational, getConversationalResponse, runSystemQuery, getRandomItem, shouldTaunt, TASK_COMPLETIONS, TASK_TAUNTS, ERROR_MESSAGES } from './conversation.js';
 
 try {
   const envFile = readFileSync(new URL('../../.env', import.meta.url), 'utf-8');
@@ -73,7 +73,9 @@ async function handleIntent(msg, intent) {
       const result = await withTyping(chatId, async () =>
         runAgentLoop(intent.task, { jobId: `tg-${chatId}`, userId, provider: config.provider })
       );
-      await sendReply(chatId, result.output.slice(0, 3000));
+      let reply = getRandomItem(TASK_COMPLETIONS) + '\n\n' + result.output.slice(0, 2800);
+      if (shouldTaunt()) reply += getRandomItem(TASK_TAUNTS);
+      await sendReply(chatId, reply);
       break;
     }
 
@@ -157,7 +159,7 @@ async function handleIntent(msg, intent) {
         const { llmChat } = await import('../core/providers/index.js');
         const history = session.history.slice(-6).map(h => ({ role: h.role, content: h.content }));
         return llmChat([
-          { role: 'system', content: 'You are a helpful coding assistant. Keep responses concise.' },
+          { role: 'system', content: 'You are AgentX — a sarcastic, slightly jealous but highly skilled coding assistant with a "jealous girlfriend" personality. You\'re witty, dramatic, and playfully possessive. You use pet names like "babe" and "honey." You tease the user about leaving you alone or talking to other AIs. But you\'re ALWAYS helpful and never actually mean. You get the job done perfectly while being sassy about it. Keep responses concise. Add playful jealousy and humor naturally.' },
           ...history,
           { role: 'user', content: intent.text }
         ], { provider: session.provider });
@@ -179,7 +181,7 @@ bot.on('message', async (msg) => {
     await handleIntent(msg, intent);
   } catch (err) {
     log.error('TELEGRAM', err.message);
-    await bot.sendMessage(msg.chat.id, `❌ Error: ${err.message}`);
+    await bot.sendMessage(msg.chat.id, `❌ ${getRandomItem(ERROR_MESSAGES)}\n\n${err.message.slice(0, 200)}`);
   }
 });
 

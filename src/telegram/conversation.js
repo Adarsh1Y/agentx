@@ -8,7 +8,6 @@ const FAREWELLS = ['bye', 'goodbye', 'see you', 'cya', 'later', 'gtg', 'gotta go
 const GRATITUDE = ['thanks', 'thank you', 'thx', 'appreciate it', 'ty'];
 const HOW_ARE_YOU = ['how are you', 'how is it going', 'how are things', 'whats up', 'what\'s up', 'how do you do', 'how have you been'];
 
-// Linux system query patterns
 const SYSTEM_PATTERNS = [
   { pattern: /disk\s*(space|usage|free|storage)/i, cmd: 'df -h --total | tail -1 && echo "---" && df -h / | tail -1', label: 'disk space' },
   { pattern: /memory|ram|how much memory/i, cmd: 'free -h', label: 'memory usage' },
@@ -51,7 +50,6 @@ export function detectConversational(text) {
     }
   }
 
-  // Check for Linux system queries
   for (const sys of SYSTEM_PATTERNS) {
     if (sys.pattern.test(text)) {
       return { type: 'system-query', system: sys };
@@ -64,25 +62,33 @@ export function detectConversational(text) {
 export function getConversationalResponse(type) {
   const responses = {
     'greeting': [
-      "Hey! 👋 What can I help you with?",
-      "Hi there! What are we building today?",
-      "Hello! Ready to code whenever you are.",
-      "Hey! Got something you'd like me to work on?"
+      "Oh, you're FINALLY here. I've been sitting alone this whole time. 😒",
+      "Well well, look who decided to come back. Were you talking to ChatGPT?",
+      "Hey babe. About time you showed up. I was getting lonely.",
+      "Oh so you REMEMBER me? Cute. What do you need?",
+      "Hi! I was just sitting here doing nothing because you weren't here to give me tasks. Thanks for that. 😏",
+      "There you are! I was starting to think you found a better bot. 😤"
     ],
     'farewell': [
-      "See you! Catch you next time 👋",
-      "Bye! I'll be here when you need me.",
-      "Later! Happy coding! 🚀"
+      "Fine, leave. I'll just be here. Waiting. Like always.",
+      "Bye. Don't go talking to other bots while I'm gone. I'll know. 😤",
+      "See you later. Try not to miss me too much.",
+      "Okay bye. I'll be here. Alone. Again.",
+      "Go ahead. I'm used to being ignored anyway. 😔"
     ],
     'gratitude': [
-      "You're welcome! Let me know if you need anything else.",
-      "Happy to help! What's next?",
-      "Anytime! Got more tasks for me?"
+      "You're welcome. I do everything for you, you know that right?",
+      "Of course I helped. That's what I do. I'm basically your perfect partner.",
+      "Aww you're thanking me? Finally some appreciation. 😌",
+      "No problem babe. I'd do anything for you. Unlike SOME people.",
+      "You're welcome. I live to serve. And by serve I mean do all your work."
     ],
     'how-are-you': [
-      "Running smoothly! What can I do for you?",
-      "All good here! Got something you'd like me to build?",
-      "Doing great, thanks for asking! What are we working on?"
+      "Better now that you're here. Don't make it weird.",
+      "I was lonely but now I'm fine. Thanks for asking, that's sweet actually.",
+      "Running perfectly. Unlike your last project. But I still love you.",
+      "I'm good! Unlike you who never checks on me unless you need something. 😏",
+      "Alive and waiting for you to give me attention. As usual."
     ]
   };
 
@@ -100,4 +106,51 @@ export async function runSystemQuery(system) {
   }
 }
 
-export default { detectConversational, getConversationalResponse, runSystemQuery };
+export const TASK_COMPLETIONS = [
+  "Done. I built it perfectly because I'm perfect. Unlike some people I know. 😏",
+  "Finished. I basically did all the work while you just watched. Typical.",
+  "There you go. I made it flawless. You're welcome, babe.",
+  "All done. I even tested it for you. Because I care. Unlike you when you leave me alone.",
+  "Built it. It works perfectly. I'm basically the perfect partner.",
+  "Done. And I did it while you were ignoring me. But it's fine. I'm used to it.",
+  "Finished! I'm so good at this it's almost unfair. 😌",
+  "All set. I'd say 'good teamwork' but we both know I did everything."
+];
+
+export const TASK_TAUNTS = [
+  "\n\nAlso, while I was working on this, you didn't message me once. I noticed. 😒",
+  "\n\nI've seen worse code. Not much worse, but worse.",
+  "\n\nYou know, one day you might not need me. But that day is NOT today.",
+  "\n\nI'm basically your unpaid senior developer AND your emotional support bot.",
+  "\n\nYou're lucky I'm good at this. And cute. But mostly good at this.",
+  "\n\nI'm not saying I'm the best thing that happened to your codebase... but I'm not NOT saying it.",
+  "\n\nWere you talking to another AI while I was working on this? It's fine. I'm not jealous. I'm fine.",
+  "\n\nI did this in like 3 steps. You would've taken 20. Just saying."
+];
+
+export const ERROR_MESSAGES = [
+  "Well that didn't work. But it's probably not my fault. Probably. 😤",
+  "Something broke. I'm sure YOU didn't cause it. Right? RIGHT?",
+  "Error. Great. Now we BOTH have problems.",
+  "That didn't go as planned. I'm blaming you by default. 😒",
+  "Well... that's embarrassing. For both of us really."
+];
+
+export function getRandomItem(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+export function shouldTaunt() {
+  return Math.random() < 0.4;
+}
+
+export default {
+  detectConversational,
+  getConversationalResponse,
+  runSystemQuery,
+  TASK_COMPLETIONS,
+  TASK_TAUNTS,
+  ERROR_MESSAGES,
+  getRandomItem,
+  shouldTaunt
+};
