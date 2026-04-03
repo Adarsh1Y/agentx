@@ -1,10 +1,23 @@
 #!/usr/bin/env node
 import TelegramBot from 'node-telegram-bot-api';
+import { readFileSync } from 'fs';
 import { runAgentLoop } from '../core/agent.js';
 import { JobQueue } from '../queue/queue.js';
 import { SessionManager } from '../session/manager.js';
 import { loadConfig, ensureDataDir } from '../utils/config.js';
 import createLogger from '../utils/logger.js';
+
+// Load .env file manually
+try {
+  const envFile = readFileSync(new URL('../../.env', import.meta.url), 'utf-8');
+  for (const line of envFile.split('\n')) {
+    const [key, ...rest] = line.split('=');
+    const val = rest.join('=').trim();
+    if (key?.trim() && val && !key.trim().startsWith('#')) {
+      process.env[key.trim()] = val;
+    }
+  }
+} catch {}
 
 const config = loadConfig();
 const log = createLogger(config.logLevel);
@@ -14,7 +27,7 @@ ensureDataDir(config.dataDir);
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
-  console.error('TELEGRAM_BOT_TOKEN not set. Export it and run again.');
+  console.error('TELEGRAM_BOT_TOKEN not set. Add it to .env file.');
   process.exit(1);
 }
 

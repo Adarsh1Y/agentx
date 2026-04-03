@@ -7,6 +7,7 @@
     "tui": "node src/tui/index.js",
     "worker": "node src/queue/worker.js",
     "telegram": "node src/telegram/index.js",
+    "setup": "bash setup.sh",
     "test": "node --test tests/"
   },
   "dependencies": {
