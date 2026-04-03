@@ -23,7 +23,7 @@ export async function openrouterChat(messages, options = {}) {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
       'HTTP-Referer': 'https://localhost',
-      'X-Title': 'Autonomous Agent'
+      'X-Title': 'AgentX'
     },
     body: JSON.stringify(body)
   });

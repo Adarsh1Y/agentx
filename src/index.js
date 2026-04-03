@@ -8,7 +8,7 @@ const log = createLogger(config.logLevel);
 
 ensureDataDir(config.dataDir);
 
-log.info('MAIN', 'Starting Autonomous Agent System');
+log.info('MAIN', 'Starting AgentX');
 log.info('MAIN', `Provider: ${config.provider} | Model: ${config.ollamaModel}`);
 log.info('MAIN', `Data dir: ${config.dataDir}`);
 

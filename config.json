@@ -1,5 +1,5 @@
 {
-  "provider": "ollama",
+  "provider": "openrouter",
   "ollamaModel": "qwen2.5:1.5b",
   "ollamaBaseUrl": "http://localhost:11434",
   "openrouterApiKey": "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",

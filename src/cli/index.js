@@ -21,7 +21,7 @@ const program = new Command();
 
 program
   .name('agent')
-  .description('Autonomous AI Coding Agent')
+  .description('AgentX — AI Coding Agent')
   .version('1.0.0');
 
 program

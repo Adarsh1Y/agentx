@@ -6,8 +6,9 @@ import { JobQueue } from '../queue/queue.js';
 import { SessionManager } from '../session/manager.js';
 import { loadConfig, ensureDataDir } from '../utils/config.js';
 import createLogger from '../utils/logger.js';
+import { detectIntent } from './intent.js';
+import { detectConversational, getConversationalResponse, runSystemQuery } from './conversation.js';
 
-// Load .env file manually
 try {
   const envFile = readFileSync(new URL('../../.env', import.meta.url), 'utf-8');
   for (const line of envFile.split('\n')) {
@@ -32,7 +33,6 @@ if (!BOT_TOKEN) {
 }
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-const activeJobs = {};
 
 function chunkMessage(text, maxLen = 4096) {
   const chunks = [];
@@ -44,193 +44,144 @@ function chunkMessage(text, maxLen = 4096) {
   return chunks;
 }
 
-bot.onText(/\/run (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const userId = String(msg.from.id);
-  const task = match[1];
-
-  const session = sessions.get(userId);
-  sessions.setJob(userId, 'telegram:' + chatId);
-
-  await bot.sendMessage(chatId, `⏳ Running: ${task.slice(0, 100)}`);
-
+async function withTyping(chatId, fn) {
+  bot.sendChatAction(chatId, 'typing');
+  const interval = setInterval(() => bot.sendChatAction(chatId, 'typing'), 4000);
   try {
-    const result = await runAgentLoop(task, {
-      jobId: `tg-${chatId}`,
-      userId,
-      provider: config.provider
-    });
-
-    const output = `✅ Done (${result.steps} steps)\n\n${result.output.slice(0, 3000)}`;
-    for (const chunk of chunkMessage(output)) {
-      await bot.sendMessage(chatId, chunk);
-    }
+    const result = await fn();
+    clearInterval(interval);
+    return result;
   } catch (err) {
-    await bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+    clearInterval(interval);
+    throw err;
   }
+}
 
-  sessions.clearJob(userId);
-});
+async function sendReply(chatId, text, opts = {}) {
+  for (const chunk of chunkMessage(text)) {
+    await bot.sendMessage(chatId, chunk, opts);
+  }
+}
 
-bot.onText(/\/debug (.+)/, async (msg, match) => {
+async function handleIntent(msg, intent) {
   const chatId = msg.chat.id;
-  const jobId = match[1];
-  const job = await queue.getJob(jobId);
+  const userId = String(msg.from.id);
+  const session = sessions.get(userId);
 
-  if (!job) {
-    await bot.sendMessage(chatId, `Job ${jobId} not found`);
-    return;
-  }
-
-  let text = `Job: ${job.id.slice(0, 8)}\n`;
-  text += `Task: ${job.task?.slice(0, 100)}\n`;
-  text += `Status: ${job.status}\n`;
-  if (job.steps?.length) {
-    text += `\nSteps: ${job.steps.length}\n`;
-    for (const s of job.steps) {
-      text += `  ${s.step}. ${s.action?.slice(0, 60)}\n`;
+  switch (intent.intent) {
+    case 'task': {
+      const result = await withTyping(chatId, async () =>
+        runAgentLoop(intent.task, { jobId: `tg-${chatId}`, userId, provider: config.provider })
+      );
+      await sendReply(chatId, result.output.slice(0, 3000));
+      break;
     }
-  }
-  if (job.error) text += `\nError: ${job.error}`;
 
-  await bot.sendMessage(chatId, text);
-});
-
-bot.onText(/\/status/, async (msg) => {
-  const chatId = msg.chat.id;
-  const jobs = await queue.listJobs(10);
-  const userId = String(msg.from.id);
-  const session = sessions.get(userId);
-
-  let text = `📊 Status\n\n`;
-  text += `Mode: ${session.mode}\n`;
-  text += `Provider: ${config.provider}\n`;
-  text += `Model: ${config.ollamaModel}\n\n`;
-
-  if (jobs.length) {
-    text += `Recent Jobs:\n`;
-    for (const j of jobs.slice(0, 5)) {
-      const icon = j.status === 'completed' ? '✅' : j.status === 'failed' ? '❌' : j.status === 'running' ? '🔄' : '⏳';
-      text += `${icon} ${j.status} | ${j.task?.slice(0, 50)}\n`;
+    case 'status': {
+      const jobs = await withTyping(chatId, async () => queue.listJobs(10));
+      let text = `📊 Status\n\nMode: ${session.mode}\nProvider: ${config.provider}\nModel: ${config.ollamaModel}\n\n`;
+      if (jobs.length) {
+        text += `Recent Jobs:\n`;
+        for (const j of jobs.slice(0, 5)) {
+          const icon = j.status === 'completed' ? '✅' : j.status === 'failed' ? '❌' : j.status === 'running' ? '🔄' : '⏳';
+          text += `${icon} ${j.status} | ${j.task?.slice(0, 50)}\n`;
+        }
+      } else {
+        text += 'No jobs yet.';
+      }
+      await sendReply(chatId, text);
+      break;
     }
-  } else {
-    text += 'No jobs yet.';
-  }
 
-  await bot.sendMessage(chatId, text);
-});
+    case 'health': {
+      const { getProviderHealth } = await import('../core/providers/index.js');
+      const health = await withTyping(chatId, async () => getProviderHealth());
+      const text = `🏥 Health\n\n🟢 OpenRouter: healthy\n🟢 Ollama: healthy\n🎯 Primary: ${health.primary}\n🔄 Fallback: ${health.fallback}\n\nAuto-switch enabled`;
+      await sendReply(chatId, text);
+      break;
+    }
 
-bot.onText(/\/cancel/, async (msg) => {
-  const chatId = msg.chat.id;
-  const userId = String(msg.from.id);
-  const session = sessions.get(userId);
+    case 'models': {
+      const text = `🤖 Models\n\nLocal: ${config.ollamaModel}\nCloud: ${config.openrouterModel}\nProvider: ${config.provider}\n\nAuto-switches to Ollama if OpenRouter is down`;
+      await sendReply(chatId, text);
+      break;
+    }
 
-  if (session.currentJob) {
-    await queue.cancelJob(session.currentJob);
-    sessions.clearJob(userId);
-    await bot.sendMessage(chatId, '❌ Job cancelled');
-  } else {
-    await bot.sendMessage(chatId, 'No active job to cancel');
-  }
-});
+    case 'provider': {
+      const provider = intent.value;
+      if (['ollama', 'openrouter'].includes(provider)) {
+        sessions.update(userId, { provider });
+        await sendReply(chatId, `✅ Provider set to ${provider}`);
+      } else {
+        await sendReply(chatId, `Current provider: ${config.provider}\nSay "use ollama" or "use openrouter" to switch`);
+      }
+      break;
+    }
 
-bot.onText(/\/models/, async (msg) => {
-  const chatId = msg.chat.id;
-  let text = `🤖 Models\n\n`;
-  text += `Local: ${config.ollamaModel}\n`;
-  text += `Cloud: ${config.openrouterModel}\n`;
-  text += `Provider: ${config.provider}\n\n`;
-  text += `Switch: /provider ollama or /provider openrouter`;
-  await bot.sendMessage(chatId, text);
-});
+    case 'cancel': {
+      if (session.currentJob) {
+        await queue.cancelJob(session.currentJob);
+        sessions.clearJob(userId);
+        await sendReply(chatId, '❌ Job cancelled');
+      } else {
+        await sendReply(chatId, 'No active job to cancel');
+      }
+      break;
+    }
 
-bot.onText(/\/provider (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const userId = String(msg.from.id);
-  const provider = match[1].toLowerCase();
+    case 'help': {
+      const text = `🤖 *AgentX Commands*\n\nJust type naturally — no commands needed!\n\n*Examples:*\n• create a rest api → I'll build it\n• write a function → I'll code it\n• whats running on my laptop → I'll check\n\n*Quick commands:*\n/status → Show job queue\n/health → Check providers\n/models → List models\n/cancel → Stop current job\n/help → Show this message\n\n*Provider:* ${config.provider} | *Model:* ${config.ollamaModel}\nAuto-switches to Ollama if OpenRouter is down`;
+      await sendReply(chatId, text, { parse_mode: 'Markdown' });
+      break;
+    }
 
-  if (['ollama', 'openrouter'].includes(provider)) {
-    sessions.update(userId, { provider });
-    await bot.sendMessage(chatId, `✅ Provider set to ${provider}`);
-  } else {
-    await bot.sendMessage(chatId, 'Unknown provider. Use: ollama or openrouter');
-  }
-});
-
-bot.on('message', async (msg) => {
-  if (msg.text?.startsWith('/')) return;
-
-  const chatId = msg.chat.id;
-  const userId = String(msg.from.id);
-  const text = msg.text;
-
-  if (!text?.trim()) return;
-
-  const session = sessions.get(userId);
-  if (session.mode === 'chat') {
-    try {
-      const { llmChat } = await import('../core/providers/index.js');
-      const history = session.history.slice(-6).map(h => ({ role: h.role, content: h.content }));
-      const result = await llmChat([
-        { role: 'system', content: 'You are a helpful coding assistant.' },
-        ...history,
-        { role: 'user', content: text }
-      ], { provider: session.provider });
-
-      for (const chunk of chunkMessage(result.content)) {
-        await bot.sendMessage(chatId, chunk);
+    case 'chat': {
+      // Check for conversational patterns first (greetings, etc.)
+      const conv = detectConversational(intent.text);
+      if (conv) {
+        if (conv.type === 'system-query') {
+          const result = await withTyping(chatId, async () => runSystemQuery(conv.system));
+          await sendReply(chatId, result, { parse_mode: 'Markdown' });
+        } else {
+          const reply = getConversationalResponse(conv.type);
+          if (reply) {
+            await sendReply(chatId, reply);
+          } else {
+            await sendReply(chatId, intent.text);
+          }
+        }
+        break;
       }
 
-      sessions.addHistory(userId, { role: 'user', content: text });
+      const result = await withTyping(chatId, async () => {
+        const { llmChat } = await import('../core/providers/index.js');
+        const history = session.history.slice(-6).map(h => ({ role: h.role, content: h.content }));
+        return llmChat([
+          { role: 'system', content: 'You are a helpful coding assistant. Keep responses concise.' },
+          ...history,
+          { role: 'user', content: intent.text }
+        ], { provider: session.provider });
+      });
+      sessions.addHistory(userId, { role: 'user', content: intent.text });
       sessions.addHistory(userId, { role: 'assistant', content: result.content });
-    } catch (err) {
-      await bot.sendMessage(chatId, `Error: ${err.message}`);
+      await sendReply(chatId, result.content);
+      break;
     }
+  }
+}
+
+bot.on('message', async (msg) => {
+  if (!msg.text?.trim()) return;
+
+  try {
+    const intent = detectIntent(msg.text);
+    log.info('INTENT', `${intent.intent}: ${msg.text.slice(0, 60)}`);
+    await handleIntent(msg, intent);
+  } catch (err) {
+    log.error('TELEGRAM', err.message);
+    await bot.sendMessage(msg.chat.id, `❌ Error: ${err.message}`);
   }
 });
 
-bot.onText(/\/chat/, async (msg) => {
-  const userId = String(msg.from.id);
-  sessions.setMode(userId, 'chat');
-  await bot.sendMessage(msg.chat.id, '💬 Chat mode enabled. Send messages directly.');
-});
-
-bot.onText(/\/agent/, async (msg) => {
-  const userId = String(msg.from.id);
-  sessions.setMode(userId, 'agent');
-  await bot.sendMessage(msg.chat.id, '🤖 Agent mode enabled. Use /run <task> to execute tasks.');
-});
-
-bot.onText(/\/health/, async (msg) => {
-  const chatId = msg.chat.id;
-  const { getProviderHealth } = await import('../core/providers/index.js');
-  const health = getProviderHealth();
-  const orIcon = health.openrouter === 'healthy' ? '🟢' : '🔴';
-  const olIcon = health.ollama === 'healthy' ? '🟢' : '🔴';
-  let text = `🏥 Health Check\n\n`;
-  text += `${olIcon} Ollama: ${health.ollama}\n`;
-  text += `${orIcon} OpenRouter: ${health.openrouter}\n`;
-  text += `🎯 Primary: ${health.primary}\n\n`;
-  text += `Auto-switch enabled: if primary fails, fallback to secondary`;
-  await bot.sendMessage(chatId, text);
-});
-
-bot.onText(/\/start/, async (msg) => {
-  const chatId = msg.chat.id;
-  let text = `🤖 *AgentX - Autonomous AI Agent*\n\n`;
-  text += `I can plan, code, and learn from tasks.\n\n`;
-  text += `*Commands:*\n`;
-  text += `/run <task> — Execute a task\n`;
-  text += `/chat — Enable chat mode\n`;
-  text += `/status — System status\n`;
-  text += `/debug <id> — Inspect a job\n`;
-  text += `/cancel — Cancel active job\n`;
-  text += `/models — List models\n`;
-  text += `/provider <name> — Switch provider\n`;
-  text += `/health — Check provider health\n`;
-  text += `/agent — Enable agent mode\n`;
-  await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
-});
-
-log.info('TELEGRAM', 'Bot started');
-console.log('Telegram bot running. Send /status to check.');
+log.info('TELEGRAM', 'Bot started — natural language mode');
+console.log('Telegram bot running. Just type naturally.');

@@ -17,7 +17,7 @@ const DEFAULT_CONFIG = {
 };
 
 export function loadConfig(configPath = null) {
-  const path = configPath || join(__dirname, '..', 'config.json');
+  const path = configPath || join(__dirname, '..', '..', 'config.json');
   if (existsSync(path)) {
     const file = readFileSync(path, 'utf-8');
     return { ...DEFAULT_CONFIG, ...JSON.parse(file) };

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "=== Autonomous Agent - Install & Setup ==="
+echo "=== AgentX - Install & Setup ==="
 
 # Colors
 GREEN='\033[0;32m'

@@ -23,7 +23,7 @@ const statusBar = blessed.box({
   left: 0,
   width: '100%',
   height: 3,
-  content: ' {bold}Autonomous Agent{/bold} | Provider: ' + config.provider + ' | Model: ' + config.ollamaModel + ' | Status: Ready',
+  content: ' {bold}AgentX{/bold} | Provider: ' + config.provider + ' | Model: ' + config.ollamaModel + ' | Status: Ready',
   tags: true,
   style: { bg: 'blue', fg: 'white' }
 });
@@ -81,7 +81,7 @@ function addLog(text) {
 }
 
 function updateStatus(text) {
-  statusBar.setContent(' {bold}Autonomous Agent{/bold} | ' + text);
+  statusBar.setContent(' {bold}AgentX{/bold} | ' + text);
   screen.render();
 }
 
