@@ -1,0 +1,11 @@
+{
+  "provider": "ollama",
+  "ollamaModel": "lfm2.5-thinking:1.2b",
+  "ollamaBaseUrl": "http://localhost:11434",
+  "openrouterApiKey": "",
+  "openrouterModel": "openrouter/free",
+  "maxSteps": 5,
+  "redisUrl": "redis://localhost:6379",
+  "dataDir": "/home/adarsh/.opencode-mem",
+  "logLevel": "info"
+}
