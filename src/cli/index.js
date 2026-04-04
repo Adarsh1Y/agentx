@@ -4,6 +4,8 @@ import { runAgentLoop } from '../core/agent.js';
 import { JobQueue } from '../queue/queue.js';
 import { SessionManager } from '../session/manager.js';
 import { StrategyMemory } from '../memory/strategy.js';
+import { UserManager } from '../core/middleware/users.js';
+import { getSecurityReport, scanCodePatterns } from '../core/tools/security.js';
 import { loadConfig, ensureDataDir } from '../utils/config.js';
 import createLogger from '../utils/logger.js';
 import { readFileSync, writeFileSync } from 'fs';
@@ -14,6 +16,7 @@ const log = createLogger(config.logLevel);
 const queue = new JobQueue();
 const sessions = new SessionManager(config.dataDir);
 const strategyMemory = new StrategyMemory(config.dataDir);
+const userManager = new UserManager(config.dataDir);
 
 ensureDataDir(config.dataDir);
 
@@ -208,6 +211,165 @@ program
       } catch {
         console.log('Could not list Ollama models. Is Ollama running?');
       }
+    }
+  });
+
+program
+  .command('security')
+  .description('Scan current project for security issues')
+  .option('-d, --directory <dir>', 'Directory to scan', process.cwd())
+  .option('-f, --file <file>', 'Scan a single file')
+  .action(async (opts) => {
+    if (opts.file) {
+      const issues = scanCodePatterns(opts.file);
+      if (!issues.length) {
+        console.log('✅ No security issues found');
+        return;
+      }
+      console.log(`\n=== SECURITY ISSUES (${issues.length}) ===`);
+      for (const i of issues) {
+        const icon = i.severity === 'critical' ? '🔴' : i.severity === 'high' ? '🟠' : i.severity === 'medium' ? '🟡' : '🔵';
+        console.log(`${icon} [${i.severity.toUpperCase()}] ${i.name}`);
+        console.log(`   Line ${i.line}: ${i.detail}`);
+        if (i.fix) console.log(`   Fix: ${i.fix}`);
+        console.log();
+      }
+      return;
+    }
+
+    console.log('Scanning project...');
+    const report = await getSecurityReport(opts.directory);
+    console.log(`\n=== SECURITY REPORT ===`);
+    console.log(`Risk Level: ${report.riskLevel} (Score: ${report.riskScore})`);
+    console.log(`Total Issues: ${report.totalIssues}`);
+    console.log(`\nBy Severity:`);
+    for (const [sev, count] of Object.entries(report.bySeverity)) {
+      if (count > 0) console.log(`  ${sev}: ${count}`);
+    }
+    if (report.issues.length) {
+      console.log(`\n=== ISSUES ===`);
+      for (const i of report.issues) {
+        const icon = i.severity === 'critical' ? '🔴' : i.severity === 'high' ? '🟠' : i.severity === 'medium' ? '🟡' : '🔵';
+        const loc = i.file ? `${i.file}:${i.line || '?'}` : 'dependency';
+        console.log(`${icon} [${i.severity.toUpperCase()}] ${i.name}`);
+        console.log(`   ${loc}`);
+        console.log(`   ${i.detail}`);
+        if (i.fix) console.log(`   Fix: ${i.fix}`);
+        console.log();
+      }
+    }
+  });
+
+program
+  .command('users')
+  .description('Manage users')
+  .option('-l, --list', 'List all users')
+  .option('-c, --create', 'Create a new user')
+  .option('-u, --user-id <id>', 'User ID')
+  .option('-n, --name <name>', 'User name')
+  .option('-r, --role <role>', 'User role (admin, developer, viewer)')
+  .option('-d, --delete', 'Delete a user')
+  .action(async (opts) => {
+    if (opts.list) {
+      const users = userManager.listUsers();
+      if (!users.length) {
+        console.log('No users found');
+        return;
+      }
+      console.log('\n=== USERS ===');
+      for (const u of users) {
+        console.log(`${u.id} | ${u.name} | ${u.role} | Created: ${u.createdAt}`);
+      }
+      return;
+    }
+
+    if (opts.create) {
+      if (!opts.user || !opts.name) {
+        console.log('Usage: agent users -c -u <userId> -n <name> [-r <role>]');
+        return;
+      }
+      const result = userManager.createUser(opts.user, opts.name, opts.role || 'developer');
+      if (result.success) {
+        console.log(`✅ Created user: ${result.user.name} (${result.user.id}) as ${result.user.role}`);
+      } else {
+        console.log(`❌ ${result.error}`);
+      }
+      return;
+    }
+
+    if (opts.delete) {
+      if (!opts.user) {
+        console.log('Usage: agent users -d -u <userId>');
+        return;
+      }
+      const result = userManager.deleteUser(opts.user);
+      if (result.success) {
+        console.log(`✅ Deleted user: ${opts.user}`);
+      } else {
+        console.log(`❌ ${result.error}`);
+      }
+      return;
+    }
+
+    if (opts.user && opts.role) {
+      const result = userManager.updateUser(opts.user, { role: opts.role });
+      if (result.success) {
+        console.log(`✅ Updated ${opts.user} role to ${opts.role}`);
+      } else {
+        console.log(`❌ ${result.error}`);
+      }
+      return;
+    }
+
+    if (opts.user) {
+      const user = userManager.getUser(opts.user);
+      if (user) {
+        console.log(`\n=== USER ===`);
+        console.log(`ID: ${user.id}`);
+        console.log(`Name: ${user.name}`);
+        console.log(`Role: ${user.role}`);
+        console.log(`Created: ${user.createdAt}`);
+        console.log(`Last Active: ${user.lastActive}`);
+      } else {
+        console.log(`User ${opts.user} not found`);
+      }
+      return;
+    }
+
+    console.log('Usage: agent users [options]');
+    console.log('\nOptions:');
+    console.log('  -l, --list              List all users');
+    console.log('  -c, --create            Create a new user');
+    console.log('  -u, --user-id <id>      User ID');
+    console.log('  -n, --name <name>       User name');
+    console.log('  -r, --role <role>       User role');
+    console.log('  -d, --delete            Delete a user');
+  });
+
+program
+  .command('team-strategies')
+  .description('View or add team strategies')
+  .option('-l, --list', 'List team strategies')
+  .option('-a, --add <strategy>', 'Add a team strategy')
+  .action(async (opts) => {
+    if (opts.list || (!opts.list && !opts.add)) {
+      const strategies = userManager.getTeamStrategies();
+      if (!strategies.length) {
+        console.log('No team strategies');
+        return;
+      }
+      console.log('\n=== TEAM STRATEGIES ===');
+      for (const s of strategies) {
+        console.log(`\n[${s.addedAt}] ${s.name || s.strategy}`);
+        if (s.tags?.length) console.log(`  Tags: ${s.tags.join(', ')}`);
+      }
+      return;
+    }
+
+    if (opts.add) {
+      const entry = userManager.addTeamStrategy({ strategy: opts.add });
+      console.log(`✅ Added team strategy: ${entry.strategy}`);
+      return;
     }
   });
 

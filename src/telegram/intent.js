@@ -8,6 +8,7 @@ const HEALTH_KEYWORDS = ['health', 'is it working', 'is it up'];
 const MODELS_KEYWORDS = ['models', 'list models', 'what models', 'available models', 'show models'];
 const HELP_KEYWORDS = ['help', 'commands', 'what can you do', 'how to use'];
 const CANCEL_KEYWORDS = ['cancel', 'stop', 'abort'];
+const UNDO_KEYWORDS = ['undo', 'revert', 'rollback', 'undo last', 'revert last', 'undo last task', 'revert last task'];
 
 export function detectIntent(text) {
   const lower = text.toLowerCase().trim();
@@ -34,6 +35,14 @@ export function detectIntent(text) {
   }
   if (clean.includes('use ollama') || clean.includes('switch to ollama')) return { intent: 'provider', value: 'ollama' };
   if (clean.includes('use openrouter') || clean.includes('switch to openrouter')) return { intent: 'provider', value: 'openrouter' };
+
+  for (const kw of UNDO_KEYWORDS) {
+    if (clean === kw || clean.startsWith(kw)) {
+      const jobIdMatch = clean.match(/undo\s+([a-zA-Z0-9-]+)/);
+      if (jobIdMatch) return { intent: 'undo', jobId: jobIdMatch[1] };
+      return { intent: 'undo' };
+    }
+  }
 
   // Task: verb + object pattern (e.g. "create api", "build server")
   const hasVerb = TASK_VERBS.some(v => clean.includes(v));

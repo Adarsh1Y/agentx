@@ -3,9 +3,11 @@ import { stream } from './streaming.js';
 import { loadConfig } from '../utils/config.js';
 import createLogger from '../utils/logger.js';
 import { StrategyMemory, ProjectMemory, TraceStore } from '../memory/strategy.js';
+import { getProjectInfo, getProjectStructure, detectConventions } from './workspace.js';
 import * as files from './tools/files.js';
 import * as commands from './tools/commands.js';
 import * as web from './tools/web.js';
+import * as testing from './tools/testing.js';
 
 const config = loadConfig();
 const log = createLogger(config.logLevel);
@@ -62,7 +64,7 @@ Error: {error}
 Provide a corrected solution. If the approach won't work, suggest an alternative.`;
 
 export async function runAgentLoop(task, options = {}) {
-  const { jobId, userId = 'default', provider, model } = options;
+  const { jobId, userId = 'default', provider, model, context } = options;
   const maxSteps = config.maxSteps;
   const maxRetries = 2;
 
@@ -73,12 +75,27 @@ export async function runAgentLoop(task, options = {}) {
   stream('PLAN', { status: 'generating plan', jobId }, jobId);
   const strategies = strategyMemory.search(task, 3).map(s => s.strategy).join('\n');
   const projectCtx = projectMemory.getContext();
+  const projectInfo = getProjectInfo();
+  const projectStructure = getProjectStructure(process.cwd(), 2);
+  const conventions = detectConventions();
+  const contextSummary = context?.summary || '';
+
+  const workspaceContext = {
+    project: projectInfo,
+    structure: projectStructure,
+    conventions,
+    testRunner: projectInfo.testRunner || 'unknown'
+  };
+
+  const contextSection = contextSummary
+    ? `\n\nPast context summary (from previous interactions):\n${contextSummary.slice(0, 2000)}`
+    : '';
 
   let steps = [];
   try {
     const planMsg = await llmChat([
       { role: 'system', content: 'You are a task planner. Break tasks into simple, executable steps. Each step should be specific and actionable. Respond with ONLY a JSON array like: [{"step":1,"action":"do something"}]' },
-      { role: 'user', content: `Task: ${task}\n\nPast strategies: ${strategies || 'None'}\nProject context: ${JSON.stringify(projectCtx)}` }
+      { role: 'user', content: `Task: ${task}\n\nPast strategies: ${strategies || 'None'}\nProject context: ${JSON.stringify(projectCtx)}\n\nWorkspace context:\n- Type: ${projectInfo.type}\n- Language: ${projectInfo.language}\n- Framework: ${projectInfo.framework || 'none'}\n- Test runner: ${projectInfo.testRunner || 'unknown'}\n- Structure: ${JSON.stringify(projectStructure).slice(0, 1500)}\n- Conventions: ${JSON.stringify(conventions)}${contextSection}` }
     ], { provider, model });
 
     log.info('AGENT', `Plan: ${planMsg.content.slice(0, 200)}`);
@@ -100,8 +117,10 @@ export async function runAgentLoop(task, options = {}) {
 
   // EXECUTE with self-correction
   const results = [];
+  const writtenFiles = [];
+
   for (const step of steps) {
-    stream('STEP', { step: step.step, action: step.action, jobId }, jobId);
+    stream('STEP', { step: step.step, action: step.action, total: steps.length, jobId }, jobId);
     log.info('AGENT', `Executing step ${step.step}: ${step.action?.slice(0, 60)}`);
 
     let stepResult = null;
@@ -119,7 +138,7 @@ export async function runAgentLoop(task, options = {}) {
 
         log.info('AGENT', `Step ${step.step} response: ${execMsg.content.slice(0, 200)}`);
 
-        const executionResult = await executeActions(execMsg.content);
+        const executionResult = await executeActions(execMsg.content, writtenFiles);
         stepResult = { success: true, content: execMsg.content, output: executionResult };
         break;
       } catch (err) {
@@ -143,6 +162,63 @@ export async function runAgentLoop(task, options = {}) {
     });
 
     stream('RESULT', { step: step.step, success: stepResult?.success, jobId }, jobId);
+  }
+
+  // AUTO-TEST: Run tests after writing files
+  if (writtenFiles.length > 0) {
+    stream('REVIEW', { status: 'running tests', jobId }, jobId);
+    log.info('AGENT', `Running tests for ${writtenFiles.length} written files`);
+
+    const testResult = await testing.runTests(projectInfo.testRunner);
+    let testAttempts = 0;
+    const maxTestFixes = 2;
+
+    if (!testResult.success && testAttempts < maxTestFixes) {
+      stream('REFLECT', { status: 'fixing test failures', jobId }, jobId);
+      const failures = await testing.fixTestFailures(testResult.output);
+      log.info('AGENT', `Test failures detected: ${failures.failures.length}`);
+
+      const fixPrompt = `The following tests failed:\n\n${failures.rawOutput}\n\nFix the failing tests. Update the source code or test files as needed.`;
+
+      while (!testResult.success && testAttempts < maxTestFixes) {
+        testAttempts++;
+        stream('RETRY', { step: 'test-fix', attempt: testAttempts, jobId }, jobId);
+        log.info('AGENT', `Attempting test fix ${testAttempts}/${maxTestFixes}`);
+
+        try {
+          const fixMsg = await llmChat([
+            { role: 'system', content: TOOL_PROMPT + '\n\nTests are failing. Fix the code or tests to make them pass.' },
+            { role: 'user', content: fixPrompt }
+          ], { provider, model });
+
+          await executeActions(fixMsg.content, writtenFiles);
+          const newTestResult = await testing.runTests(projectInfo.testRunner);
+
+          if (newTestResult.success) {
+            testResult.success = true;
+            testResult.output = newTestResult.output;
+            log.info('AGENT', `Tests passed after ${testAttempts} fix attempt(s)`);
+          } else {
+            testResult.output = newTestResult.output;
+            testResult.error = newTestResult.error;
+          }
+        } catch (err) {
+          log.warn('AGENT', `Test fix attempt ${testAttempts} failed: ${err.message}`);
+        }
+      }
+    }
+
+    const testSummary = testResult.success
+      ? `✅ All tests passed (${testResult.framework || 'unknown'})`
+      : `❌ Tests failed after ${testAttempts} fix attempts\n${testResult.output?.slice(0, 500) || ''}`;
+
+    results.push({
+      step: 'test',
+      action: 'Run and fix tests',
+      success: testResult.success,
+      result: testSummary,
+      retries: testAttempts
+    });
   }
 
   // CODE REVIEW
@@ -185,11 +261,13 @@ export async function runAgentLoop(task, options = {}) {
   // Save trace
   traceStore.save({ task, steps: results, provider, completedAt: Date.now() });
 
+  const testResult = results.find(r => r.step === 'test');
   const finalResult = {
     task,
     steps: results.length,
-    output: results.filter(r => r.step !== 'review').map(r => r.result).join('\n\n').slice(0, 4000),
+    output: results.filter(r => r.step !== 'review' && r.step !== 'test').map(r => r.result).join('\n\n').slice(0, 4000),
     review: results.find(r => r.step === 'review')?.result,
+    testResults: testResult ? { success: testResult.success, result: testResult.result, retries: testResult.retries } : null,
     strategies: strategyMemory.count(),
     retries: results.reduce((sum, r) => sum + (r.retries || 0), 0)
   };
@@ -207,7 +285,7 @@ function buildContext(results, currentStep) {
     .join('\n') || 'First step.';
 }
 
-async function executeActions(content) {
+async function executeActions(content, writtenFiles = []) {
   const outputs = [];
   const codeBlocks = extractCodeBlocks(content);
 
@@ -226,6 +304,7 @@ async function executeActions(content) {
       const result = files.writeFile(block.filePath, block.code);
       outputs.push({ type: 'write', ...result });
       projectMemory.updateFile(block.filePath, block.code);
+      writtenFiles.push(block.filePath);
       log.info('AGENT', `File written: ${block.filePath}`);
     }
   }
