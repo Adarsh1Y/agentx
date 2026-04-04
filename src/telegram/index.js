@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 import TelegramBot from 'node-telegram-bot-api';
-import { readFileSync } from 'fs';
+import { readFileSync, statSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+import { join, dirname } from 'path';
+import { homedir } from 'os';
 import { runAgentLoop } from '../core/agent.js';
 import { JobQueue } from '../queue/queue.js';
 import { SessionManager } from '../session/manager.js';
 import { loadConfig, ensureDataDir } from '../utils/config.js';
 import createLogger from '../utils/logger.js';
 import { detectIntent } from './intent.js';
-import { detectConversational, getConversationalResponse, runSystemQuery, getRandomItem, shouldAddNote, TASK_COMPLETIONS, TASK_NOTES, ERROR_MESSAGES } from './conversation.js';
+import { detectConversational, getConversationalResponse, runSystemQuery, getRandomItem, shouldAddNote, formatTaskResult, TASK_COMPLETIONS, TASK_NOTES, ERROR_MESSAGES } from './conversation.js';
+import { launchApp } from '../core/tools/launcher.js';
+import { searchFiles, fileExists } from '../core/tools/files.js';
 import { emitter } from '../core/streaming.js';
 import { UndoManager } from '../core/middleware/undo.js';
 import { ContextManager } from '../core/middleware/context.js';
@@ -15,6 +19,7 @@ import { UserManager } from '../core/middleware/users.js';
 
 const undoManager = new UndoManager();
 const contextManagers = {};
+const pendingFiles = {};
 
 try {
   const envFile = readFileSync(new URL('../../.env', import.meta.url), 'utf-8');
@@ -137,9 +142,11 @@ async function handleIntent(msg, intent) {
         contextManager.addMessage('assistant', result.output);
         const ctxData = contextManager.toJSON();
         sessions.update(userId, { contextData: ctxData });
-        let reply = getRandomItem(TASK_COMPLETIONS) + '\n\n' + result.output.slice(0, 2800);
+        
+        const formattedReply = formatTaskResult(result);
+        let reply = getRandomItem(TASK_COMPLETIONS) + '\n\n' + formattedReply.slice(0, 3000);
         if (shouldAddNote()) reply += getRandomItem(TASK_NOTES);
-        await sendReply(chatId, reply);
+        await sendReply(chatId, reply, { parse_mode: 'Markdown' });
       } finally {
         const idx = emitter._listeners.stream?.indexOf(streamHandler);
         if (idx !== undefined && idx !== -1) {
@@ -217,8 +224,148 @@ async function handleIntent(msg, intent) {
       break;
     }
 
+    case 'launch': {
+      const result = await withTyping(chatId, async () => launchApp(intent.app));
+      if (result.success) {
+        await sendReply(chatId, `✅ ${result.message}${result.pid ? ` (PID: ${result.pid})` : ''}`);
+      } else {
+        await sendReply(chatId, `❌ ${result.error}`);
+      }
+      break;
+    }
+
+    case 'find-file': {
+      const result = await withTyping(chatId, async () => {
+        const os = await import('os');
+        const homeDir = os.homedir();
+        
+        const sensitivePatterns = ['.env', 'id_rsa', 'shadow', 'passwd', 'secret', 'token', '.pem', '.key', 'password', '.git-credentials'];
+        for (const pat of sensitivePatterns) {
+          if (intent.query.toLowerCase().includes(pat)) {
+            return { success: false, error: 'Cannot send files with sensitive names. Try a different file.' };
+          }
+        }
+
+        const searchDirs = [
+          homeDir,
+          join(homeDir, 'Documents'),
+          join(homeDir, 'Downloads'),
+          join(homeDir, 'Desktop')
+        ].filter(d => existsSync(d));
+
+        const results = [];
+        for (const dir of searchDirs) {
+          const searchResult = searchFiles(dir, intent.query);
+          if (searchResult.success && searchResult.files) {
+            results.push(...searchResult.files);
+          }
+        }
+
+        if (results.length === 0) {
+          return { success: false, error: `Couldn't find any file matching "${intent.query}"` };
+        }
+
+        if (results.length === 1) {
+          const filePath = results[0];
+          if (statSync(filePath).size > 10 * 1024 * 1024) {
+            return { success: false, error: 'File too large (max 10MB).' };
+          }
+          return { success: true, files: [filePath], multiple: false };
+        }
+
+        return { success: true, files: results.slice(0, 10), multiple: true };
+      });
+
+      if (!result.success) {
+        await sendReply(chatId, `❌ ${result.error}`);
+        break;
+      }
+
+      if (result.multiple) {
+        let list = `📄 Found ${result.files.length} files matching "${intent.query}":\n\n`;
+        result.files.forEach((f, i) => {
+          list += `${i + 1}. ${f}\n`;
+        });
+        list += '\nWhich file would you like me to send?';
+        await sendReply(chatId, list);
+        break;
+      }
+
+      try {
+        await bot.sendDocument(chatId, result.files[0]);
+        await sendReply(chatId, `📎 Sent: ${result.files[0]}`);
+      } catch (err) {
+        await sendReply(chatId, `❌ Couldn't send file: ${err.message}`);
+      }
+      break;
+    }
+
+    case 'save-file': {
+      const pending = pendingFiles[userId];
+      if (!pending) {
+        await sendReply(chatId, "No pending file. Send me a file first, then say 'save this'.");
+        break;
+      }
+      
+      try {
+        const os = await import('os');
+        const homeDir = os.homedir();
+        const savePath = join(homeDir, 'Downloads');
+        
+        if (!existsSync(savePath)) {
+          mkdirSync(savePath, { recursive: true });
+        }
+        
+        const destPath = join(savePath, pending.fileName);
+        
+        await bot.sendMessage(chatId, `📥 Downloading ${pending.fileName}...`);
+        const fileStream = await bot.getFile(pending.fileId);
+        await bot.downloadFile(fileStream.file_path, destPath);
+        
+        const size = statSync(destPath).size;
+        const sizeStr = size > 1024 * 1024 
+          ? `${(size / (1024 * 1024)).toFixed(1)}MB` 
+          : `${(size / 1024).toFixed(1)}KB`;
+        
+        delete pendingFiles[userId];
+        await bot.sendMessage(chatId, `✅ Saved: ${destPath}\n📊 Size: ${sizeStr}`);
+      } catch (err) {
+        await sendReply(chatId, `❌ Failed to save: ${err.message}`);
+      }
+      break;
+    }
+
     case 'help': {
-      const text = `🤖 *AgentX Commands*\n\nJust type naturally — no commands needed!\n\n*Examples:*\n• create a rest api → I'll build it\n• write a function → I'll code it\n• whats running on my laptop → I'll check\n\n*Quick commands:*\n/status → Show job queue\n/health → Check providers\n/models → List models\n/cancel → Stop current job\n/help → Show this message\n\n*Provider:* ${config.provider} | *Model:* ${config.ollamaModel}\nAuto-switches to Ollama if OpenRouter is down`;
+      const text = `🤖 *AgentX — Your AI Coding Assistant*
+
+Just type naturally — no commands needed!
+
+*System Queries (instant):*
+• "how many directories on my laptop"
+• "what apps are running"
+• "check memory"
+• "show disk space"
+• "which files are largest"
+
+*Tasks:*
+• "create a rest api" → I'll build it
+• "write a function" → I'll code it
+• "build a website" → I'll create it
+
+*File & App:*
+• "send me my resume" → Find & send file
+• "open Firefox" → Launch an app
+• Send a file → "save to Downloads" → Saves it
+
+*Quick Commands:*
+/status → Job queue
+/health → Provider health
+/models → Available models
+/cancel → Stop job
+/help → This message
+
+*Provider:* ${config.provider} (${config.ollamaModel})
+Auto-switches to Ollama if OpenRouter is down`;
       await sendReply(chatId, text, { parse_mode: 'Markdown' });
       break;
     }
@@ -269,13 +416,102 @@ async function handleIntent(msg, intent) {
 }
 
 bot.on('message', async (msg) => {
-  if (!msg.text?.trim()) return;
-
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
   const userName = msg.from.first_name || msg.from.username || 'Unknown';
 
   userManager.ensureUser(userId, userName);
+
+  const hasMedia = msg.document || msg.photo || msg.audio || msg.video;
+  
+  if (hasMedia) {
+    try {
+      let file, fileName, caption;
+      
+      if (msg.document) {
+        file = msg.document;
+        fileName = file.file_name || 'document';
+        caption = msg.caption;
+      } else if (msg.photo) {
+        file = msg.photo[msg.photo.length - 1];
+        fileName = `photo_${file.file_id.slice(-8)}.jpg`;
+        caption = msg.caption;
+      } else if (msg.audio) {
+        file = msg.audio;
+        fileName = file.file_name || 'audio';
+        caption = msg.caption;
+      } else if (msg.video) {
+        file = msg.video;
+        fileName = file.file_name || 'video';
+        caption = msg.caption;
+      }
+
+      pendingFiles[userId] = { fileId: file.file_id, fileName, chatId };
+
+      const text = caption?.trim() || '';
+      let savePath = join(homedir(), 'Downloads');
+      let customPath = null;
+
+      if (text) {
+        const savePatterns = [
+          { regex: /save to (.+)/i, extract: 1 },
+          { regex: /save in (.+)/i, extract: 1 },
+          { regex: /put in (.+)/i, extract: 1 },
+          { regex: /downloads/i, extract: null },
+          { regex: /documents/i, extract: null },
+          { regex: /desktop/i, extract: null },
+          { regex: /\/(.+)/, extract: 1 },
+        ];
+
+        for (const pat of savePatterns) {
+          const match = text.match(pat.regex);
+          if (match) {
+            if (pat.extract !== null && match[pat.extract]) {
+              customPath = match[pat.extract].trim();
+            } else if (pat.regex.toString().includes('downloads')) {
+              savePath = join(homedir(), 'Downloads');
+            } else if (pat.regex.toString().includes('documents')) {
+              savePath = join(homedir(), 'Documents');
+            } else if (pat.regex.toString().includes('desktop')) {
+              savePath = join(homedir(), 'Desktop');
+            }
+            break;
+          }
+        }
+
+        if (customPath && (customPath.startsWith('/') || customPath.startsWith('~'))) {
+          savePath = customPath.replace('~', homedir());
+        } else if (customPath) {
+          savePath = join(homedir(), customPath);
+        }
+      }
+
+      if (!existsSync(savePath)) {
+        mkdirSync(savePath, { recursive: true });
+      }
+
+      const destPath = join(savePath, fileName);
+      await bot.sendMessage(chatId, `📥 Downloading ${fileName}...`);
+
+      const fileStream = await bot.getFile(file.file_id);
+      await bot.downloadFile(fileStream.file_path, destPath);
+
+      const size = statSync(destPath).size;
+      const sizeStr = size > 1024 * 1024 
+        ? `${(size / (1024 * 1024)).toFixed(1)}MB` 
+        : `${(size / 1024).toFixed(1)}KB`;
+
+      await bot.sendMessage(chatId, `✅ Saved: ${destPath}\n📊 Size: ${sizeStr}`);
+      log.info('FILE', `Saved ${fileName} to ${destPath}`);
+
+    } catch (err) {
+      log.error('FILE', err.message);
+      await bot.sendMessage(chatId, `❌ Failed to save file: ${err.message}`);
+    }
+    return;
+  }
+
+  if (!msg.text?.trim()) return;
 
   try {
     const text = msg.text.trim();

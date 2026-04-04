@@ -39,23 +39,26 @@ const TOOLS = {
   test_api: web.testApi
 };
 
-const TOOL_PROMPT = `You have access to these tools. Use them by writing code blocks:
+const TOOL_PROMPT = `You are a coding assistant. Execute the task by writing code blocks.
 
-**File Tools:**
-- Read a file: just describe the path and I'll read it
-- Write a file: use \`\`\`javascript <filepath>\n<code>\n\`\`\`
-- Edit a file: use \`\`\`edit <filepath>\n<old text>\n---\n<new text>\n\`\`\`
-- List directory: use \`\`\`bash\nls -la <path>\n\`\`\`
+**WRITE a file:**
+\`\`\`javascript path/to/file.js
+console.log("content");
+\`\`\`
 
-**Command Tools:**
-- Run bash: use \`\`\`bash\n<command>\n\`\`\`
-- Git: use \`\`\`bash\ngit <command>\n\`\`\`
+**EDIT a file:**
+\`\`\`edit path/to/file.js
+old text
+---
+new text
+\`\`\`
 
-**Web Tools:**
-- Search: use \`\`\`bash\ncurl "https://html.duckduckgo.com/html/?q=<query>"\n\`\`\`
-- Fetch URL: use \`\`\`bash\ncurl -s <url>\n\`\`\`
+**RUN a command:**
+\`\`\`bash
+ls -la
+\`\`\`
 
-Always respond with the tool call in a code block. Keep explanations brief.`;
+**Just output the code block. No explanations.**`;
 
 const SELF_CORRECT_PROMPT = `The previous step failed. Analyze the error and provide a corrected approach.
 
@@ -182,7 +185,7 @@ export async function runAgentLoop(task, options = {}) {
     stream('REVIEW', { status: 'running tests', jobId }, jobId);
     log.info('AGENT', `Running tests for ${writtenFiles.length} written files`);
 
-    const testResult = await testing.runTests(projectInfo.testRunner);
+    const testResult = await testing.runTests(projectInfo.cwd || process.cwd());
     let testAttempts = 0;
     const maxTestFixes = 2;
 
@@ -333,14 +336,30 @@ async function executeActions(content, writtenFiles = []) {
 
 function extractCodeBlocks(content) {
   const blocks = [];
-  const regex = /```(\w+)?(?:\s+([^\n]+))?\n([\s\S]*?)```/g;
+  const regex = /```(\w+)?\s*(?:([^\n]*?)\n)?([\s\S]*?)```/g;
   let match;
   while ((match = regex.exec(content)) !== null) {
-    blocks.push({
-      lang: match[1] ?? 'text',
-      filePath: match[2]?.trim(),
-      code: match[3].trim()
-    });
+    let lang = match[1] ?? 'text';
+    let filePath = match[2]?.trim();
+    let code = match[3].trim();
+
+    // If filePath has code in it (the model put code in the wrong place), merge them
+    if (filePath && code) {
+      code = filePath + '\n' + code;
+      filePath = null;
+    } else if (filePath && !code) {
+      // If code is empty but filePath exists, treat filePath as code
+      code = filePath;
+      filePath = null;
+    }
+
+    // Only treat as filePath if it looks like a real path (contains / or .)
+    if (filePath && !filePath.includes('/') && !filePath.includes('.') && !filePath.includes('\\')) {
+      code = (code ? code + '\n' + filePath : filePath);
+      filePath = null;
+    }
+
+    blocks.push({ lang, filePath, code });
   }
   return blocks;
 }
