@@ -8,12 +8,14 @@ import * as files from './tools/files.js';
 import * as commands from './tools/commands.js';
 import * as web from './tools/web.js';
 import * as testing from './tools/testing.js';
+import { SkillRegistry } from './skills/skills.js';
 
 const config = loadConfig();
 const log = createLogger(config.logLevel);
 const strategyMemory = new StrategyMemory(config.dataDir);
 const projectMemory = new ProjectMemory(config.dataDir);
 const traceStore = new TraceStore(config.dataDir);
+const skillRegistry = new SkillRegistry(config.dataDir);
 
 const TOOLS = {
   read_file: files.readFile,
@@ -71,6 +73,13 @@ export async function runAgentLoop(task, options = {}) {
   stream('START', { task, jobId }, jobId);
   log.info('AGENT', `Starting: ${task.slice(0, 80)}`);
 
+  const matchedSkill = skillRegistry.match(task);
+  let skillPrompt = null;
+  if (matchedSkill) {
+    skillPrompt = skillRegistry.execute(matchedSkill.name, task);
+    log.info('AGENT', `Skill matched: ${matchedSkill.name}`);
+  }
+
   // PLANNER
   stream('PLAN', { status: 'generating plan', jobId }, jobId);
   const strategies = strategyMemory.search(task, 3).map(s => s.strategy).join('\n');
@@ -93,8 +102,12 @@ export async function runAgentLoop(task, options = {}) {
 
   let steps = [];
   try {
+    const systemContent = skillPrompt
+      ? `You are executing a skill. Follow these instructions carefully.\n\n${skillPrompt}\n\nBreak this into executable steps. Respond with ONLY a JSON array like: [{"step":1,"action":"do something"}]`
+      : 'You are a task planner. Break tasks into simple, executable steps. Each step should be specific and actionable. Respond with ONLY a JSON array like: [{"step":1,"action":"do something"}]';
+
     const planMsg = await llmChat([
-      { role: 'system', content: 'You are a task planner. Break tasks into simple, executable steps. Each step should be specific and actionable. Respond with ONLY a JSON array like: [{"step":1,"action":"do something"}]' },
+      { role: 'system', content: systemContent },
       { role: 'user', content: `Task: ${task}\n\nPast strategies: ${strategies || 'None'}\nProject context: ${JSON.stringify(projectCtx)}\n\nWorkspace context:\n- Type: ${projectInfo.type}\n- Language: ${projectInfo.language}\n- Framework: ${projectInfo.framework || 'none'}\n- Test runner: ${projectInfo.testRunner || 'unknown'}\n- Structure: ${JSON.stringify(projectStructure).slice(0, 1500)}\n- Conventions: ${JSON.stringify(conventions)}${contextSection}` }
     ], { provider, model });
 
