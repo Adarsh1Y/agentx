@@ -2,7 +2,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'fs';
 import { join } from 'path';
-import { loadConfig } from '../utils/config.js';
+import { loadConfig } from '../../utils/config.js';
 
 const config = loadConfig();
 const execAsync = promisify(exec);
