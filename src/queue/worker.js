@@ -67,3 +67,14 @@ export class Worker {
 }
 
 export default { Worker };
+
+const worker = new Worker();
+worker.start().catch(err => {
+  log.error('WORKER', `Fatal: ${err.message}`);
+  process.exit(1);
+});
+
+process.on('SIGTERM', () => {
+  log.info('WORKER', 'Shutting down');
+  worker.stop();
+});
